@@ -52,53 +52,70 @@ function manifest() {
   };
 }
 
-/** Sport buckets, derived from the channel name. */
+/** Coarse grouping for the catalog rows. */
 function bucket(m) {
-  const n = (m.name + " " + (m.sport || "")).toLowerCase();
-  if (/football|soccer|liga|premier|serie|bundes|ligue|ucl|uel|nfl/.test(n)) return "football";
-  if (/nba|nhl|mlb|ufc|wwe|motorsport|f1|nascar/.test(n)) return "other";
+  const n = ((m.sport || "") + " " + (m.competition || "") + " " + (m.name || "")).toLowerCase();
+  if (/football|soccer|liga|premier|serie|bundes|ligue|ucl|uel|libertadores/.test(n)) return "football";
   return "other";
 }
 
+/** ISO kick-off -> "20 Oct 20:00" */
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toISOString().slice(5, 10).replace("-", " ") + " " + d.toISOString().slice(11, 16) + " UTC";
+}
+
 function toMeta(m) {
+  const bits = [];
+  if (m.status === "live") bits.push("\u2022 LIVE");
+  else if (m.starts_at) bits.push(when(m.starts_at));
+  if (m.competition) bits.push(m.competition);
+  if (m.channel_count) bits.push(m.channel_count + (m.channel_count === 1 ? " channel" : " channels"));
+
   return {
     id: m.id,
     type: "tv",
     name: m.name,
-    description: m.sport ? m.sport : "Live",
-    // A channel poster is optional; Nuvio renders a tile without one.
+    description: bits.join(" \u2022 "),
+    // Nuvio renders a square tile for tv-type catalog entries.
     posterShape: "square",
     genres: m.sport ? [m.sport] : undefined
   };
 }
 
 function catalogRows(id) {
-  const want = id === "live-matches-football"
-    ? "football"
-    : id === "live-matches-other"
-      ? "other"
-      : null;
+  const want = id === "live-matches-football" ? "football"
+    : id === "live-matches-other" ? "other"
+    : null;
 
-  return MATCHES.filter(function (m) {
-    return !want || bucket(m) === want;
-  }).map(toMeta);
+  return MATCHES
+    .filter(function (m) { return !want || bucket(m) === want; })
+    // Live events first, then whatever is coming up.
+    .sort(function (a, b) {
+      if (a.status === "live" && b.status !== "live") return -1;
+      if (b.status === "live" && a.status !== "live") return 1;
+      return String(a.starts_at || "").localeCompare(String(b.starts_at || ""));
+    })
+    .map(toMeta);
 }
 
 function streamsFor(id) {
-  const m = MATCHES.find(function (x) {
-    return x.id === id || x.name === id;
-  });
+  const m = MATCHES.find(function (x) { return x.id === id || x.name === id; });
   if (!m) return [];
 
-  return [
-    {
+  // One entry per verified channel carrying the event.
+  return (m.channels || []).map(function (ch) {
+    const bits = [ch.quality, ch.language, ch.country].filter(Boolean);
+    return {
       name: "Live",
-      title: (m.name || "Live") + (m.sport ? " \u2022 " + m.sport : ""),
-      url: m.url,
-      quality: "Auto",
+      title: (m.name || "Live") + (bits.length ? " \u2022 " + bits.join(" \u2022 ") : ""),
+      url: ch.url,
+      quality: ch.quality || "Auto",
       behaviorHints: { notWebReady: false, bingeGroup: "livematches" }
-    }
-  ];
+    };
+  });
 }
 
 export default {

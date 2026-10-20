@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
- * Rebuild matches.js.
+ * Rebuild matches.js — as live EVENTS, not channels.
  *
- * Discovers live events from the source site, then verifies each one against
- * the unsigned CDN endpoint. Only events that actually answer are written, so
- * the committed list contains working streams rather than hopeful guesses.
+ * The source site embeds a full events array in its page: title, sport,
+ * competition, kick-off time, live status, and the channels carrying it. This
+ * reads that array and, for every channel on every event, resolves the embed
+ * slug to its stream on the open CDN and verifies it actually answers.
+ *
+ * Only verified channels are written, and an event is only written if at least
+ * one of its channels verified — so the list never contains a match that cannot
+ * actually be watched.
  *
  *   node tools/refresh.js
  *
- * Runs on a schedule via .github/workflows/refresh.yml. Nothing here runs at
- * request time — this is why the addon keeps working when the site does not.
+ * Nothing here runs at request time. That is what keeps the addon working when
+ * the source site is down.
  */
 
 import { writeFileSync } from "node:fs";
@@ -17,34 +22,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const SITE = "https://tflix.su";
-/**
- * Embed hosts seen on the source site. All of them are the same player platform
- * on different domains, so any of these can introduce an event.
- *
- * Only events whose stream resolves on the open CDN are kept. Some backends
- * serve CENC-encrypted DASH with a ClearKey instead, and those are deliberately
- * skipped: using them would mean handing the player a decryption key.
- */
-const EMBED_HOSTS = [
-  "event.kpores.ru",
-  "sha.dsfigosdhgfvsshed.xyz",
-  "nfl.sjncvuaq.xyz",
-  "vix.sjncvuaq.xyz",
-  "mix1.eeeertwfvsgs.xyz",
-  "vixembed.bid"
-];
-
-const EMBED_RE = new RegExp(
-  "https://(?:" + EMBED_HOSTS.map(function (h) {
-    return h.replace(/\./g, "\\.");
-  }).join("|") + ")/embed/([A-Za-z0-9_-]+)",
-  "g"
-);
 
 /**
- * The unsigned CDN path. This is the whole point: the player-facing URL carries
- * a hash and an expiry timestamp, but the bare path serves the same playlist
- * without either, so no signing step is needed and nothing expires.
+ * The open CDN. The player-facing URL this replaces carries a hash and an
+ * expiry; the bare path serves the same playlist without either, so no signing
+ * step is needed and nothing expires.
  *
  * If the CDN ever moves, this is the one line to change.
  */
@@ -53,49 +35,56 @@ const CDN = "https://vix.cdnfan.site/tflix/";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/** Human-readable label from an event slug. */
-function displayName(slug) {
-  const known = {
-    "BR-LC": "Brazil \u2022 Libertadores",
-    "WOLF-PO": "WOLF \u2022 Portugal",
-    "WWE-RAW": "WWE Raw",
-    "DAZN-LALIGA-ES": "LaLiga \u2022 DAZN"
-  };
-  if (known[slug]) return known[slug];
+const VERIFY_MS = 7000;
 
-  // Keep short all-caps tokens (NHL, WWE, UFC) as acronyms; title-case the rest.
-  return slug
-    .replace(/-CR$/, "")
-    .replace(/-ES$/, "")
-    .split("-")
-    .map(function (part) {
-      if (part.length <= 4 && part === part.toUpperCase() && /[A-Z]/.test(part)) {
-        return part;
+/** Pull the "events":[...] array out of the page by balanced brackets. */
+function extractEvents(html) {
+  const at = html.indexOf('"events":[');
+  if (at < 0) return null;
+  const start = html.indexOf("[", at);
+
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = start; i < html.length; i++) {
+    const c = html[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\") { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "[") depth++;
+    else if (c === "]") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(html.slice(start, i + 1));
+        } catch (e) {
+          return null;
+        }
       }
-      return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
-    })
-    .join(" ");
+    }
+  }
+  return null;
 }
 
-function sportOf(slug) {
-  if (/NFL/i.test(slug)) return "NFL";
-  if (/NHL/i.test(slug)) return "NHL";
-  if (/NBA/i.test(slug)) return "NBA";
-  if (/MLB/i.test(slug)) return "MLB";
-  if (/UFC/i.test(slug)) return "UFC";
-  if (/WWE/i.test(slug)) return "Wrestling";
-  if (/LALIGA|LC|ARENA|DAZN|WOLF|PO/i.test(slug)) return "Football";
-  return "Sport";
+/** .../embed/SKY-SPORTS-MAIN-EVENT-UK  ->  SKY-SPORTS-MAIN-EVENT-UK */
+function slugFromEmbed(url) {
+  if (!url) return null;
+  const m = String(url).match(/\/embed\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
 }
 
-async function head(url, ms) {
+async function live(url, ms) {
   const ctl = new AbortController();
   const timer = setTimeout(function () {
     ctl.abort();
-  }, ms || 8000);
+  }, ms || VERIFY_MS);
   try {
     const r = await fetch(url, { headers: { "User-Agent": UA }, signal: ctl.signal });
-    return r.ok;
+    if (!r.ok) return false;
+    const t = await r.text();
+    return t.indexOf("#EXTM3U") !== -1;
   } catch (e) {
     return false;
   } finally {
@@ -103,25 +92,23 @@ async function head(url, ms) {
   }
 }
 
-async function discover() {
-  const r = await fetch(SITE + "/", { headers: { "User-Agent": UA } });
-  if (!r.ok) throw new Error("source site returned " + r.status);
-  const html = await r.text();
-
-  const slugs = [];
-  let m;
-  EMBED_RE.lastIndex = 0;
-  while ((m = EMBED_RE.exec(html)) !== null) {
-    if (!slugs.includes(m[1])) slugs.push(m[1]);
-  }
-  return slugs;
+/** Check every distinct channel slug once, then reuse the result. */
+async function verifySlugs(slugs) {
+  const cache = {};
+  await Promise.all(
+    slugs.map(async function (s) {
+      cache[s] = await live(CDN + s + ".m3u8");
+    })
+  );
+  return cache;
 }
 
 async function main() {
-  let slugs = [];
+  let html;
   try {
-    slugs = await discover();
-    console.log("[refresh] discovered " + slugs.length + " events from " + SITE);
+    const r = await fetch(SITE + "/", { headers: { "User-Agent": UA } });
+    if (!r.ok) throw new Error("source site returned " + r.status);
+    html = await r.text();
   } catch (e) {
     // Never wipe a good list because the site was briefly unreachable.
     console.error("[refresh] discovery failed:", e.message);
@@ -129,44 +116,89 @@ async function main() {
     process.exit(0);
   }
 
-  const results = await Promise.all(
-    slugs.map(async function (slug) {
-      const url = CDN + slug + ".m3u8";
-      const ok = await head(url, 8000);
-      return ok ? { slug: slug, url: url } : null;
-    })
-  );
+  const events = extractEvents(html);
+  if (!events || !events.length) {
+    console.error("[refresh] no events found in the page — leaving matches.js untouched");
+    process.exit(0);
+  }
+  console.log("[refresh] " + events.length + " events in the feed");
 
-  const live = results.filter(Boolean);
-  console.log("[refresh] " + live.length + " of " + slugs.length + " verified live");
+  // Gather every channel slug across every event, then verify once each.
+  const slugs = [];
+  for (const ev of events) {
+    for (const ch of ev.channels || []) {
+      const s = slugFromEmbed(ch.embed_url);
+      if (s && !slugs.includes(s)) slugs.push(s);
+    }
+  }
+  console.log("[refresh] " + slugs.length + " distinct channels to verify");
 
-  const entries = live.map(function (x) {
-    return {
-      id: "tflix:" + x.slug,
-      name: displayName(x.slug),
-      sport: sportOf(x.slug),
-      url: x.url,
-      source: "event.kpores.ru/" + x.slug
-    };
+  const ok = await verifySlugs(slugs);
+  const working = slugs.filter(function (s) {
+    return ok[s];
+  });
+  console.log("[refresh] " + working.length + " of " + slugs.length + " channels verified");
+
+  const out = [];
+  for (const ev of events) {
+    const live = [];
+    for (const ch of ev.channels || []) {
+      const s = slugFromEmbed(ch.embed_url);
+      if (!s || !ok[s]) continue;
+      live.push({
+        name: ch.name || s,
+        quality: ch.quality || undefined,
+        language: ch.language || undefined,
+        country: ch.country || undefined,
+        slug: s,
+        url: CDN + s + ".m3u8"
+      });
+    }
+    // An event with nothing playable is not worth listing.
+    if (!live.length) continue;
+
+    out.push({
+      id: "tflix:" + (ev.id || ev.watch_url || ev.title),
+      name: ev.title || "Live",
+      sport: ev.sport || "Sport",
+      competition: ev.competition || "",
+      status: ev.status || "scheduled",
+      starts_at: ev.starts_at || null,
+      channel_count: live.length,
+      channels: live
+    });
+  }
+
+  // Live first, then by kick-off.
+  out.sort(function (a, b) {
+    if (a.status === "live" && b.status !== "live") return -1;
+    if (b.status === "live" && a.status !== "live") return 1;
+    return String(a.starts_at || "").localeCompare(String(b.starts_at || ""));
   });
 
   const here = dirname(fileURLToPath(import.meta.url));
-  const out = join(here, "..", "matches.js");
-
   const body =
     "/**\n" +
-    " * Live match channels.\n" +
+    " * Live events.\n" +
     " *\n" +
     " * GENERATED by tools/refresh.js on a schedule \u2014 do not edit by hand.\n" +
     " *\n" +
-    " * Every entry was verified against its unsigned CDN endpoint at build time,\n" +
-    " * so these URLs carry no signature and no expiry.\n" +
+    " * Each event lists only channels that were verified against the open CDN at\n" +
+    " * build time, so every entry here is watchable without a signature or a\n" +
+    " * decryption key.\n" +
     " */\n\n" +
     "export const REFRESHED_AT = " + JSON.stringify(new Date().toISOString()) + ";\n\n" +
-    "export const MATCHES = " + JSON.stringify(entries, null, 2) + ";\n";
+    "export const MATCHES = " + JSON.stringify(out, null, 2) + ";\n";
 
-  writeFileSync(out, body);
-  console.log("[refresh] wrote " + entries.length + " entries to matches.js");
+  writeFileSync(join(here, "..", "matches.js"), body);
+
+  const liveCount = out.filter(function (e) {
+    return e.status === "live";
+  }).length;
+  console.log(
+    "[refresh] wrote " + out.length + " events (" + liveCount + " live), " +
+    working.length + " working channels"
+  );
 }
 
 main().catch(function (e) {
