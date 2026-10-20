@@ -1,0 +1,6 @@
+# Cloudflare Workers configuration — optional, for the Worker route.
+# The Pages route uses _worker.js instead and does not need this.
+name = "live-matches"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true

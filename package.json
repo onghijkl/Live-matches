@@ -1,0 +1,9 @@
+{
+  "name": "live-matches",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "refresh": "node tools/refresh.js"
+  }
+}
