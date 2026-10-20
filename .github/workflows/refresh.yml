@@ -21,13 +21,13 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Rebuild matches.js
+      - name: Rebuild matches.json
         run: node tools/refresh.js
 
       - name: Validate
         run: |
           node -e '
-            import("./matches.js").then(function (m) {
+            import("./matches.json", { with: { type: "json" } }).then(function (m) {
               const n = (m.MATCHES || []).length;
               console.log("entries:", n);
               for (const x of m.MATCHES || []) {
@@ -41,11 +41,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- matches.js; then
+          if git diff --quiet -- matches.json; then
             echo "no change"
             exit 0
           fi
-          git add matches.js
+          git add matches.json
           git commit -m "Refresh channel list ($(date -u +%Y-%m-%dT%H:%MZ))"
           git push
 

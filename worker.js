@@ -13,7 +13,39 @@
  *   GET /stream/tv/<id>.json
  */
 
-import { MATCHES, REFRESHED_AT } from "./matches.js";
+/**
+ * The event list is fetched from the repository rather than bundled, so a
+ * refresh never requires redeploying this Worker. Only this file changing
+ * needs a deploy; the data updates on its own.
+ */
+const LIST_URL =
+  "https://raw.githubusercontent.com/onghijkl/Live-matches/refs/heads/main/matches.json";
+
+let cached = null;
+let cachedAt = 0;
+const CACHE_MS = 5 * 60 * 1000;
+
+async function loadMatches() {
+  const now = Date.now();
+  if (cached && now - cachedAt < CACHE_MS) return cached;
+  try {
+    const r = await fetch(LIST_URL, {
+      headers: { Accept: "application/json" },
+      cf: { cacheTtl: 300, cacheEverything: true }
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const list = (j && j.events) || [];
+      if (list.length) {
+        cached = list;
+        cachedAt = now;
+      }
+    }
+  } catch (e) {
+    // fall through to whatever we last had
+  }
+  return cached || [];
+}
 
 const SITE = "https://tflix.su";
 
@@ -85,7 +117,8 @@ function toMeta(m) {
   };
 }
 
-function catalogRows(id) {
+async function catalogRows(id) {
+  const MATCHES = await loadMatches();
   const want = id === "live-matches-football" ? "football"
     : id === "live-matches-other" ? "other"
     : null;
@@ -101,7 +134,8 @@ function catalogRows(id) {
     .map(toMeta);
 }
 
-function streamsFor(id) {
+async function streamsFor(id) {
+  const MATCHES = await loadMatches();
   const m = MATCHES.find(function (x) { return x.id === id || x.name === id; });
   if (!m) return [];
 
@@ -132,16 +166,17 @@ export default {
 
       const cat = path.match(/^\/catalog\/([^/]+)\/([^/]+?)(?:\/(.+?))?\.json$/);
       if (cat) {
-        return cors(JSON.stringify({ metas: catalogRows(cat[2]) }));
+        return cors(JSON.stringify({ metas: await catalogRows(cat[2]) }));
       }
 
       const st = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
       if (st) {
-        return cors(JSON.stringify({ streams: streamsFor(decodeURIComponent(st[2])) }));
+        return cors(JSON.stringify({ streams: await streamsFor(decodeURIComponent(st[2])) }));
       }
 
       const mt = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/);
       if (mt) {
+        const MATCHES = await loadMatches();
         const m = MATCHES.find(function (x) {
           return x.id === decodeURIComponent(mt[2]);
         });
