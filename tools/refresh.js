@@ -75,18 +75,57 @@ function slugFromEmbed(url) {
   return m ? m[1] : null;
 }
 
+/**
+ * A playlist answering is NOT proof a stream works. These CDNs hand out a
+ * playlist whose segments point at a signed third-party host, and that host
+ * returns 403 - so a playlist-only check passes dead streams, which is exactly
+ * what happened. Verification therefore fetches the playlist AND the first
+ * segment, and only counts the channel if both answer.
+ */
 async function live(url, ms) {
-  const ctl = new AbortController();
-  const timer = setTimeout(function () {
-    ctl.abort();
-  }, ms || VERIFY_MS);
+  const limit = ms || VERIFY_MS;
   try {
-    const r = await fetch(url, { headers: { "User-Agent": UA }, signal: ctl.signal });
-    if (!r.ok) return false;
-    const t = await r.text();
-    return t.indexOf("#EXTM3U") !== -1;
+    const head = await get(url, limit);
+    if (!head || head.status !== 200) return false;
+    const text = await head.text();
+    if (text.indexOf("#EXTM3U") === -1) return false;
+
+    // A master playlist points at variants; follow the first one we can read.
+    let body = text;
+    if (text.indexOf("#EXT-X-STREAM-INF") !== -1) {
+      const variant = text.split("\n").map(function (l) { return l.trim(); })
+        .find(function (l) { return l && l.charAt(0) !== "#"; });
+      if (!variant) return false;
+      const vr = await get(new URL(variant, url).toString(), limit);
+      if (!vr || vr.status !== 200) return false;
+      body = await vr.text();
+    }
+
+    const seg = body.split("\n").map(function (l) { return l.trim(); })
+      .find(function (l) { return l && l.charAt(0) !== "#" && /^https?:/.test(l); });
+
+    // No segments at all means nothing to play.
+    if (!seg) return false;
+
+    const sr = await get(seg, limit);
+    if (!sr || sr.status !== 200) return false;
+    // The content type matters: some of these CDNs answer 200 with an image,
+    // which is not a stream. Requiring media stops that passing verification.
+    const ct = (sr.headers.get("content-type") || "").toLowerCase();
+    return ct.indexOf("video") !== -1 || ct.indexOf("mpegurl") !== -1 ||
+           ct.indexOf("octet-stream") !== -1;
   } catch (e) {
     return false;
+  }
+}
+
+async function get(url, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(function () { ctl.abort(); }, ms);
+  try {
+    return await fetch(url, { headers: { "User-Agent": UA }, signal: ctl.signal });
+  } catch (e) {
+    return null;
   } finally {
     clearTimeout(timer);
   }
