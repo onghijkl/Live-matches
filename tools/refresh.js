@@ -17,7 +17,29 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const SITE = "https://tflix.su";
-const EMBED_RE = /https:\/\/event\.kpores\.ru\/embed\/([A-Za-z0-9_-]+)/g;
+/**
+ * Embed hosts seen on the source site. All of them are the same player platform
+ * on different domains, so any of these can introduce an event.
+ *
+ * Only events whose stream resolves on the open CDN are kept. Some backends
+ * serve CENC-encrypted DASH with a ClearKey instead, and those are deliberately
+ * skipped: using them would mean handing the player a decryption key.
+ */
+const EMBED_HOSTS = [
+  "event.kpores.ru",
+  "sha.dsfigosdhgfvsshed.xyz",
+  "nfl.sjncvuaq.xyz",
+  "vix.sjncvuaq.xyz",
+  "mix1.eeeertwfvsgs.xyz",
+  "vixembed.bid"
+];
+
+const EMBED_RE = new RegExp(
+  "https://(?:" + EMBED_HOSTS.map(function (h) {
+    return h.replace(/\./g, "\\.");
+  }).join("|") + ")/embed/([A-Za-z0-9_-]+)",
+  "g"
+);
 
 /**
  * The unsigned CDN path. This is the whole point: the player-facing URL carries
