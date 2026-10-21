@@ -68,11 +68,32 @@ function lpInstanceId() {
   return m ? m[1] : "livepass-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 }
 
+/**
+ * Read a secret by name, case-insensitively, so LP_EMAIL / Lp_Email /
+ * lp_email all work. Cloudflare key names are case-sensitive, and a mismatch
+ * here is the difference between a working addon and "secrets are not set".
+ */
+function secret(env, name) {
+  if (!env) return null;
+  if (env[name]) return env[name];
+  const want = name.toLowerCase();
+  for (const k of Object.keys(env)) {
+    if (k.toLowerCase() === want) return env[k];
+  }
+  return null;
+}
+
 /** Log in and cache the lp_session cookie. */
 async function lpLogin(env) {
-  const email = env && env.lp_email;
-  const pass = env && env.lp_pass;
-  if (!email || !pass) throw new Error("lp_email/lp_pass secrets are not set");
+  const email = secret(env, "lp_email");
+  const pass = secret(env, "lp_pass");
+  if (!email || !pass) {
+    const have = env ? Object.keys(env).filter(function (k) { return /lp|email|pass/i.test(k); }) : [];
+    throw new Error(
+      "lp_email/lp_pass secrets are not set on this Worker" +
+      (have.length ? " (found similar keys: " + have.join(", ") + ")" : "")
+    );
+  }
 
   const r = await fetch(LP + "/api/auth/login", {
     method: "POST",
