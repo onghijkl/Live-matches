@@ -313,7 +313,7 @@ function cors(body, status) {
 function manifest() {
   return {
     id: "org.ong.livematches",
-    version: "1.1.0",
+    version: "1.2.0",
     name: "Live Matches",
     description:
       "Live sport events and live TV channels. LivePass channels stream in 1080p H.264.",
@@ -325,9 +325,6 @@ function manifest() {
     ],
     types: ["tv"],
     catalogs: [
-      { type: "tv", id: "live-matches", name: "Live Matches" },
-      { type: "tv", id: "live-matches-football", name: "Football" },
-      { type: "tv", id: "live-matches-other", name: "Other Sport" },
       { type: "tv", id: "lp-live-tv", name: "Live TV" },
       { type: "tv", id: "lp-live-sports", name: "Live Sports" },
       { type: "tv", id: "lp-live-news", name: "Live News" }
@@ -373,40 +370,13 @@ async function catalogRows(id, env) {
   if (id === "lp-live-sports") return lpChannelMetas(env, "sports");
   if (id === "lp-live-news") return lpChannelMetas(env, "news");
 
-  const MATCHES = await loadMatches();
-  const want = id === "live-matches-football" ? "football"
-    : id === "live-matches-other" ? "other"
-    : null;
-
-  return MATCHES
-    .filter(function (m) { return !want || bucket(m) === want; })
-    // Live events first, then whatever is coming up.
-    .sort(function (a, b) {
-      if (a.status === "live" && b.status !== "live") return -1;
-      if (b.status === "live" && a.status !== "live") return 1;
-      return String(a.starts_at || "").localeCompare(String(b.starts_at || ""));
-    })
-    .map(toMeta);
+  return [];
 }
 
 async function streamsFor(id, env, origin) {
   if (id.indexOf("lp:") === 0) return lpStreams(id, env, origin);
 
-  const MATCHES = await loadMatches();
-  const m = MATCHES.find(function (x) { return x.id === id || x.name === id; });
-  if (!m) return [];
-
-  // One entry per verified channel carrying the event.
-  return (m.channels || []).map(function (ch) {
-    const bits = [ch.quality, ch.language, ch.country].filter(Boolean);
-    return {
-      name: "Live",
-      title: (m.name || "Live") + (bits.length ? " \u2022 " + bits.join(" \u2022 ") : ""),
-      url: ch.url,
-      quality: ch.quality || "Auto",
-      behaviorHints: { notWebReady: false, bingeGroup: "livematches" }
-    };
-  });
+  return [];
 }
 
 /**
@@ -493,9 +463,10 @@ export default {
         if (id.indexOf("lp:") === 0) {
           return cors(JSON.stringify({ meta: { id: id, type: "tv", name: id } }));
         }
-        const MATCHES = await loadMatches();
-        const m = MATCHES.find(function (x) { return x.id === id; });
-        return cors(JSON.stringify({ meta: m ? toMeta(m) : null }));
+        return new Response("not found", {
+          status: 404,
+          headers: { "Access-Control-Allow-Origin": "*" }
+        });
       }
 
       return cors(JSON.stringify({ error: "not found", path: path }), 404);
