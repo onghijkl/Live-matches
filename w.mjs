@@ -57,6 +57,8 @@ async function loadMatches() {
 
 const LP = "https://web.livepass.app";
 const LP_CLIENT_HEADER = "x-livepass-client-instance-id";
+const LP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 let lpCookie = null;
 let lpCookieAt = 0;
@@ -125,10 +127,13 @@ async function lpFetch(path, env, extraHeaders) {
 
   async function attempt() {
     const headers = Object.assign(
-      { Accept: "application/json", Cookie: lpCookie },
+      { Accept: "application/json", Cookie: lpCookie, "User-Agent": LP_UA },
       extraHeaders || {}
     );
-    return fetch(LP + path, { headers: headers, cf: { cacheTtl: 60 } });
+    // No cf.cacheTtl: these are cookie-authenticated, and the edge cache
+    // keys on URL rather than session, so a cached response can be handed to
+    // a different session. Authenticated responses must not be cached.
+    return fetch(LP + path, { headers: headers });
   }
 
   let r = await attempt();
@@ -225,7 +230,7 @@ async function lpEventMetas(env) {
 }
 
 /** Resolve a LivePass source id to a playable stream. */
-async function lpStreams(id, env) {
+async function lpStreams(id, env, origin) {
   const prefix = "lp:";
   if (id.indexOf(prefix) !== 0) return [];
   const body = id.slice(prefix.length);
@@ -270,11 +275,17 @@ async function lpStreams(id, env) {
   // The media endpoint needs the session cookie. Nuvio supports a headers
   // object on a stream, and applies it to the manifest and its segments, so
   // this usually suffices. /lp-media is the fallback if it does not.
+  // The player does not forward a stream headers object to the segment
+  // requests, so the session cookie never reaches the media endpoint and the
+  // open fails with 401. Routing through /lp-media means the Worker attaches
+  // the cookie and rewrites segment URLs to come back through here too.
+  const proxied = (origin || "") + "/lp-media?u=" + encodeURIComponent(j.playbackUrl);
+
   return [
     {
       name: "LivePass",
       title: (title || "Live") + (j.selectedSourceLabel ? " \u2022 " + j.selectedSourceLabel : ""),
-      url: j.playbackUrl,
+      url: proxied,
       quality: "Auto",
       headers: { Cookie: lpCookie },
       behaviorHints: { notWebReady: false, bingeGroup: "livepass" }
@@ -378,8 +389,8 @@ async function catalogRows(id, env) {
     .map(toMeta);
 }
 
-async function streamsFor(id, env) {
-  if (id.indexOf("lp:") === 0) return lpStreams(id, env);
+async function streamsFor(id, env, origin) {
+  if (id.indexOf("lp:") === 0) return lpStreams(id, env, origin);
 
   const MATCHES = await loadMatches();
   const m = MATCHES.find(function (x) { return x.id === id || x.name === id; });
@@ -406,10 +417,14 @@ async function streamsFor(id, env) {
 async function lpMedia(target, env) {
   if (!lpCookie || Date.now() - lpCookieAt > LP_COOKIE_MS) await lpLogin(env);
 
-  const r = await fetch(target, {
-    headers: { Cookie: lpCookie },
-    cf: { cacheTtl: 10, cacheEverything: false }
-  });
+  // Authenticated: never edge-cache (see lpFetch).
+  const mediaHeaders = { Cookie: lpCookie, "User-Agent": LP_UA };
+  let r = await fetch(target, { headers: mediaHeaders });
+  if (r.status === 401) {
+    // Session may have lapsed between resolving and fetching.
+    await lpLogin(env);
+    r = await fetch(target, { headers: { Cookie: lpCookie, "User-Agent": LP_UA } });
+  }
   if (!r.ok) return new Response("upstream error", { status: r.status });
 
   const ct = r.headers.get("content-type") || "";
@@ -469,7 +484,7 @@ export default {
 
       const st = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
       if (st) {
-        return cors(JSON.stringify({ streams: await streamsFor(decodeURIComponent(st[2]), env) }));
+        return cors(JSON.stringify({ streams: await streamsFor(decodeURIComponent(st[2]), env, url.origin) }));
       }
 
       const mt = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/);
